@@ -1,0 +1,155 @@
+// Get centeroid
+var centroid = function(feature) {
+  return feature.centroid()
+}
+
+var centroid_table = table.map(centroid)
+ 
+// Get lat and long 
+var table_latlng = centroid_table.geometry().coordinates()
+var table_lat = table_latlng.get(0)
+var table_lng = table_latlng.get(1)
+print("Latitude : ", table_lat)
+print("Longitude : ", table_lng)
+
+// Buffer 1 km
+var table_buffer = function(feature) {
+  return feature.buffer(1000);
+};
+
+var table_buffer = table.map(table_buffer);
+
+// Add image collection for copernicus s2 surface reflectance
+var s2Sr = ee.ImageCollection('COPERNICUS/S2_SR');
+
+// Add image collection for copernicus s2 surface cloud probability
+var s2Clouds = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY');
+
+// Add start date to sort image
+var START_DATE = ee.Date('2021-01-01');
+
+// Add end date to sort image
+var END_DATE = ee.Date('2021-06-30');
+
+// Set threshold for MAX_CLOUD_PROBABILITY
+var MAX_CLOUD_PROBABILITY = 30;
+
+// Set region using imported shapefile
+var region = table
+
+// Function to maskcloud
+function maskClouds(img) {
+  var clouds = ee.Image(img.get('cloud_mask')).select('probability');
+  var isNotCloud = clouds.lt(MAX_CLOUD_PROBABILITY);
+  return img.updateMask(isNotCloud);
+}
+
+// The masks for the 10m bands sometimes do not exclude bad data at
+// scene edges, so we apply masks from the 20m and 60m bands as well.
+// Example asset that needs this operation:
+// COPERNICUS/S2_CLOUD_PROBABILITY/20190301T000239_20190301T000238_T55GDP
+function maskEdges(s2_img) {
+  return s2_img.updateMask(
+      s2_img.select('B8A').mask().updateMask(s2_img.select('B9').mask()));
+}
+
+// Filter input collections by desired data range and region.
+var criteria = ee.Filter.and(ee.Filter.bounds(region), 
+                             ee.Filter.date(START_DATE, END_DATE));
+                             
+s2Sr = s2Sr.filter(criteria).map(maskEdges);
+//print("Sent 2 SR : ", s2r)
+
+print("---Image collection for Sentinel 2 Cloud Probability : ")
+s2Clouds = s2Clouds.filter(criteria);
+print(s2Clouds)
+
+// Join S2 SR with cloud probability dataset to add cloud mask.
+var s2SrWithCloudMask = ee.Join.saveFirst('cloud_mask').apply({
+  primary: s2Sr,
+  secondary: s2Clouds,
+  condition:
+      ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+});
+
+// Get median for s2SrWithCloudMask
+var s2CloudMasked = ee.ImageCollection(s2SrWithCloudMask).map(maskClouds).median();
+
+// Set visualization parameter using band 11, band 8, and band 2
+// Set visualization to use full 12bit radiometric resolution
+var rgbVis = {min: 0, max: 4095, bands: ['B11', 'B8', 'B2']};
+var rgbVis_natural = {min: 0, max: 4095, bands: ['B4', 'B3', 'B2'], gamma: [1.5, 1.5, 1.5]};
+var ndviParams = {min: -1, max: 1, palette: ['blue', 'white', 'green']};
+
+// Clip s2CloudMasked using imported shapefiles
+var clip = s2CloudMasked.clip(table_buffer)
+
+// NDVI = (NIR -Red) / (NIR + Red)
+var NDVI = clip.expression(
+  ' (NIR - RED) / (NIR + RED) ', {
+    'NIR' : clip.select('B8'),
+    'RED' : clip.select('B4')
+  });
+
+//---------------------------------------------------LINKING UI
+// Linking map
+var linkedMap = ui.Map();
+
+// Add first layer which is our clipped raster
+Map.addLayer(clip, rgbVis, "S2 SR Clip Masked at " + MAX_CLOUD_PROBABILITY + '%', true);
+Map.addLayer(NDVI, ndviParams, "S2 NDVI", true)
+
+// Add second layer and link it to our first image
+linkedMap.addLayer(clip, rgbVis_natural, "Sentinel 2 Band432")
+
+// Style for feature
+var shown = true; // true or false, 1 or 0 
+var not_shown = false // false, or 0
+var opacity = 0.8; // number [0-1]
+var nameLayer = 'map'; // string
+var visParamsFeature = {color: 'red'}; // dictionary: 
+
+// Linked Map
+linkedMap.addLayer(table_buffer, visParamsFeature, 'Boundary Buffer 1 km', not_shown, opacity);
+linkedMap.addLayer(table, visParamsFeature, 'Boundary Non Buffer', not_shown, opacity );
+
+// Set map linker
+var linker = ui.Map.Linker([ui.root.widgets().get(0), linkedMap]);
+
+// Set split panel
+var splitPanel = ui.SplitPanel({
+  firstPanel: linker.get(0),
+  secondPanel: linker.get(1),
+  orientation: 'horizontal',
+  wipe: true,
+  style: {stretch: 'both'}
+});
+ui.root.widgets().reset([splitPanel]);
+
+// Set center for linker
+linker.get(0).setCenter(103.30858563168124, -1.1005064280109853, 12);
+
+//-------------------------------------------------------Export Data To Google Drive
+Export.image.toDrive({
+  image: clip.select(['B2', 'B3', 'B4', 'B8', 'B11']),
+  description: 'S2_B2B3B4B8B11',
+  scale: 10,
+  fileFormat: 'GeoTIFF',
+  maxPixels: 10000000000000,
+  region:table_buffer,
+  formatOptions: {
+    cloudOptimized: true
+  }
+});
+
+Export.image.toDrive({
+  image: NDVI,
+  description: 'NDVI_s2',
+  scale: 10,
+  fileFormat: 'GeoTIFF',
+  maxPixels: 10000000000000,
+  region:table_buffer,
+  formatOptions: {
+    cloudOptimized: true
+  }
+});
