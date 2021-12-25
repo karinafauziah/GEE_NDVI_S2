@@ -1,3 +1,5 @@
+// Find more on https://geosai.my.id
+
 // Get centeroid
 var centroid = function(feature) {
   return feature.centroid()
